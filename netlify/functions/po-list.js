@@ -13,7 +13,8 @@ export default async (event) => {
     const pageSize = Math.max(1, Math.min(500, parseInt(params.pageSize || '500', 10)));
     const offset = (page - 1) * pageSize;
 
-    // Return paid_at + derived status_label so UI doesn't have to guess
+    // MODIFIED: This query now joins payment data to calculate paid_total and remaining for each PO.
+    // This allows the UI to correctly display the "(Partially Paid)" status.
     const rows = await sql`
       SELECT
         po.id,
@@ -29,10 +30,17 @@ export default async (event) => {
         (po.status || CASE WHEN po.paid_at IS NOT NULL THEN ' (Paid)' ELSE '' END) AS status_label,
         po.po_number,
         po.meta,
-        COUNT(poi.id)::int AS line_items
+        COUNT(poi.id)::int AS line_items,
+        COALESCE(payments.paid_total, 0)::numeric AS paid_total,
+        GREATEST(0, po.total::numeric - COALESCE(payments.paid_total, 0))::numeric AS remaining
       FROM purchase_orders po
       LEFT JOIN purchase_order_items poi ON po.id = poi.po_id
-      GROUP BY po.id
+      LEFT JOIN (
+        SELECT po_id, SUM(amount) AS paid_total
+        FROM po_payments
+        GROUP BY po_id
+      ) AS payments ON po.id = payments.po_id
+      GROUP BY po.id, payments.paid_total
       ORDER BY po.created_at DESC
       LIMIT ${pageSize} OFFSET ${offset}
     `;
