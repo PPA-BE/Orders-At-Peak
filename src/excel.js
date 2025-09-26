@@ -1,25 +1,41 @@
 // src/excel.js
 import { money, parseNum } from "./state.js"; // TAX_RATE now lives in state.js as well
 
-const TEMPLATE_PATH = "po-template.xlsx";
+const TEMPLATE_PATH = "po-template-new.xlsx";
 const EXCEL_CELLS = {
-  sheetName: null,
-  poId: "J3",
-  date: "J2",
-  peakHst: "J4",
-  vendorRef: "J5",
-  currency: "B6",
+  sheetName: "Req",
+  // Header fields
+  requisitioner: "D3",     // REQUISITIONER value (C/D/E merged)
+  date: "I3",
+  department: "E4",
+  supplier: "C6",
+  epicorSupplierNo: "D7",
+  // Address block (supplier address)
+  addr_street: "F8",
+  addr_city: "F10",
+  addr_province: "F11",
+  addr_country: "F12",
+  addr_postal: "F13",
+  // Contact block (optional - not specified here but kept for future)
+  contact_name: "B14",
+  contact_email: "B15",
+  contact_phone: "B16",
+  // Currency (unchanged)
+  currencyCad: "C18",
+  currencyOther: "E18",
+  // Totals
+  subTotalCell: "B36"
 };
 
 const EXCEL_TABLE = {
-  startRow: 27,
+  startRow: 20,
   columns: [
-    { key: "line",         col: "B" },
-    { key: "supplierItem", col: "C" },
-    { key: "peakPart",     col: "D" },
-    { key: "description",  col: "E" }, // includes [UOM: x] if provided
-    { key: "qty",          col: "H" },
-    { key: "unitPrice",    col: "I" },
+    { key: "partNumber",   col: "A" }, // supplierItem or peakPart
+    { key: "description",  col: "C" }, // assumption: Description column is C
+    { key: "qty",          col: "F" },
+    { key: "unitPrice",    col: "G" },
+    { key: "uom",          col: "H" },
+    { key: "total",        col: "I" },
   ],
   grandTotalCell: null,
 };
@@ -35,29 +51,65 @@ export async function exportExcelUsingTemplate(payload, items) {
   await wb.xlsx.load(ab);
   const ws = EXCEL_CELLS.sheetName ? wb.getWorksheet(EXCEL_CELLS.sheetName) : wb.worksheets[0];
 
-  if (EXCEL_CELLS.poId) ws.getCell(EXCEL_CELLS.poId).value = payload.poId || "";
-  if (EXCEL_CELLS.date) { const d = payload.date ? new Date(payload.date) : new Date(); ws.getCell(EXCEL_CELLS.date).value = d; ws.getCell(EXCEL_CELLS.date).numFmt = "yyyy-mm-dd"; }
-  if (EXCEL_CELLS.peakHst)   ws.getCell(EXCEL_CELLS.peakHst).value = payload.peak?.hstNo || "";
-  if (EXCEL_CELLS.vendorRef) ws.getCell(EXCEL_CELLS.vendorRef).value = payload.vendor?.referenceNo || "";
-  if (EXCEL_CELLS.currency)  ws.getCell(EXCEL_CELLS.currency).value = payload.currency || "CAD";
+  // Header mapping
+  if (EXCEL_CELLS.requisitioner) ws.getCell(EXCEL_CELLS.requisitioner).value = payload.createdBy || payload.user?.name || "";
+  if (EXCEL_CELLS.department)    ws.getCell(EXCEL_CELLS.department).value    = payload.department || payload.user?.department || "";
+  if (EXCEL_CELLS.date)          { const d = payload.date ? new Date(payload.date) : new Date(); ws.getCell(EXCEL_CELLS.date).value = d; ws.getCell(EXCEL_CELLS.date).numFmt = "yyyy-mm-dd"; }
+  if (EXCEL_CELLS.supplier)      ws.getCell(EXCEL_CELLS.supplier).value      = (payload.vendor?.name || payload.vendor?.id || "");
+  if (EXCEL_CELLS.epicorSupplierNo) ws.getCell(EXCEL_CELLS.epicorSupplierNo).value = payload.vendor?.referenceNo || "";
+
+  // Address mapping (best effort based on available fields)
+  if (EXCEL_CELLS.addr_street)   ws.getCell(EXCEL_CELLS.addr_street).value   = payload.vendor?.address1 || "";
+  if (EXCEL_CELLS.addr_city)     ws.getCell(EXCEL_CELLS.addr_city).value     = payload.vendor?.city || "";
+  if (EXCEL_CELLS.addr_province) ws.getCell(EXCEL_CELLS.addr_province).value = payload.vendor?.state || "";
+  if (EXCEL_CELLS.addr_country)  ws.getCell(EXCEL_CELLS.addr_country).value  = payload.vendor?.country || "";
+  if (EXCEL_CELLS.addr_postal)   ws.getCell(EXCEL_CELLS.addr_postal).value   = payload.vendor?.zip || "";
+
+  // Currency mapping
+  if (payload.currency && payload.currency.toUpperCase() === "CAD") {
+    if (EXCEL_CELLS.currencyCad)   ws.getCell(EXCEL_CELLS.currencyCad).value = "CAD";
+    if (EXCEL_CELLS.currencyOther) ws.getCell(EXCEL_CELLS.currencyOther).value = "";
+  } else {
+    if (EXCEL_CELLS.currencyCad)   ws.getCell(EXCEL_CELLS.currencyCad).value = "";
+    if (EXCEL_CELLS.currencyOther) ws.getCell(EXCEL_CELLS.currencyOther).value = (payload.currency || "");
+  }
+
+
 
   let row = EXCEL_TABLE.startRow;
   (items || []).forEach((r, i) => {
     EXCEL_TABLE.columns.forEach((c) => {
       const cell = ws.getCell(a1(c.col, row));
       let val = r[c.key];
+
+      // Computed/compat fields
       if (c.key === "line") val = i + 1;
-      if (c.key === "description" && r?.uom) {
-        const u = String(r.uom).trim();
-        if (u) val = `${val || ""} [UOM: ${u}]`;
+      if (c.key === "partNumber") val = r.supplierItem || r.peakPart || r.partNumber || "";
+      if (c.key === "total") {
+        // Write a formula, but also backfill a numeric value for safety
+        try { cell.value = { formula: `F${row}*G${row}` }; } catch(_) {}
+        val = (Number(r.qty || 0) * Number(r.unitPrice || 0)) || 0;
       }
-      const isNumeric = c.key === "qty" || c.key === "unitPrice";
-      cell.value = isNumeric ? Number(val || 0) : (val ?? "");
+      const isNumeric = c.key === "qty" || c.key === "unitPrice" || c.key === "total";
+      if (cell.value && typeof cell.value === 'object' && cell.value.formula) {
+        // Already set as a formula; still set a number format if needed
+        if (c.key === "unitPrice" || c.key === "total") cell.numFmt = '#,##0.00';
+      } else {
+        cell.value = isNumeric ? Number(val || 0) : (val ?? "");
+      }
     });
     row++;
   });
 
-  const filename = (payload.poId || "PO") + ".xlsx";
+  
+  // Subtotal at B36 = SUM of totals column I from startRow to last row used
+  try {
+    const firstRow = EXCEL_TABLE.startRow;
+    const lastRow = row - 1 >= firstRow ? row - 1 : firstRow;
+    const subCell = ws.getCell(EXCEL_CELLS.subTotalCell || "B36");
+    subCell.value = { formula: `SUM(I${firstRow}:I${lastRow})` };
+  } catch(_) {}
+const filename = (payload.poId || "PO") + ".xlsx";
   const buffer = await wb.xlsx.writeBuffer();
   const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
   const a = document.createElement("a");
