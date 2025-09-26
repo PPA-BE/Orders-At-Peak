@@ -1,3 +1,7 @@
+// src/api/poapi.js
+
+import { msalInstance } from "../msal.js"; // MODIFIED: Import msalInstance
+
 function toast(msg, isError = false) {
   const toastEl = document.getElementById("toast");
   if (toastEl) {
@@ -8,6 +12,26 @@ function toast(msg, isError = false) {
   } else {
     isError ? console.error(msg) : console.log(msg);
   }
+}
+
+/**
+ * NEW: A helper function to get the current user's identity from MSAL
+ * and format it for API request headers. This ensures the backend
+ * can properly log who performed the action.
+ */
+function getIdentityHeaders() {
+  const headers = {};
+  try {
+    const acct = (msalInstance?.getActiveAccount?.() || (msalInstance?.getAllAccounts?.()[0])) || null;
+    if (acct) {
+      if (acct.username) headers["X-User-Email"] = acct.username;
+      const name = acct.name || acct.idTokenClaims?.name;
+      if (name) headers["X-User-Name"] = name;
+    }
+  } catch (e) {
+    console.warn("Could not get user identity for API headers", e);
+  }
+  return headers;
 }
 
 export async function createPO(payload) {
@@ -26,7 +50,8 @@ export async function createPO(payload) {
 export async function saveEpicorPoNumber(id, epicorPoNumber) {
   const res = await fetch("/api/po-set-epicor", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    // MODIFIED: Add identity headers
+    headers: { "Content-Type": "application/json", ...getIdentityHeaders() },
     body: JSON.stringify({ id, epicorPoNumber }),
   });
 
@@ -41,7 +66,8 @@ export async function saveEpicorPoNumber(id, epicorPoNumber) {
 export async function updatePoStatus(id, status) {
   const res = await fetch(`/api/po-update-status`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    // MODIFIED: Add identity headers
+    headers: { "Content-Type": "application/json", ...getIdentityHeaders() },
     body: JSON.stringify({ id, status }),
   });
 
@@ -56,7 +82,8 @@ export async function updatePoStatus(id, status) {
 export async function markPoAsPaid(id) {
   const res = await fetch("/api/po-mark-paid", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    // MODIFIED: Add identity headers
+    headers: { "Content-Type": "application/json", ...getIdentityHeaders() },
     body: JSON.stringify({ id }),
   });
 
@@ -68,7 +95,6 @@ export async function markPoAsPaid(id) {
   return res.json();
 }
 
-/* ===== NEW: Partial payment API (with header identity + route fallback) ===== */
 async function postJsonWithFallback(path1, path2, payload, extraHeaders = {}) {
   // Try primary path
   let res = await fetch(path1, {
@@ -96,17 +122,8 @@ async function postJsonWithFallback(path1, path2, payload, extraHeaders = {}) {
 }
 
 export async function addPoPayment({ id, amount, method, note }) {
-  // Best-effort to attach identity so the function can fill paid_by/actor
-  let userEmail = undefined, userName = undefined;
-  try {
-    const acct = (window.msalInstance?.getActiveAccount?.() || (window.msalInstance?.getAllAccounts?.()[0])) || null;
-    userEmail = acct?.username || undefined;
-    userName  = acct?.name || acct?.idTokenClaims?.name || undefined;
-  } catch { /* ignore */ }
-
-  const headers = {};
-  if (userEmail) headers["X-User-Email"] = userEmail;
-  if (userName)  headers["X-User-Name"]  = userName;
+  // REFACTORED: Use the centralized identity helper
+  const headers = getIdentityHeaders();
 
   return postJsonWithFallback(
     "/api/po-add-payment",
